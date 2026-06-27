@@ -764,7 +764,7 @@ func (l *Conn) GSSAPIBindRequestWithAPOptions(client GSSAPIClient, req *GSSAPIBi
 		}
 		// Send Bind request containing the current token and extract the
 		// token sent by server.
-		recvToken, err = l.saslBindTokenExchange(req.Controls, reqToken)
+		recvToken, err = l.saslBindTokenExchange("GSSAPI", req.Controls, reqToken)
 		if err != nil {
 			return err
 		}
@@ -777,8 +777,8 @@ func (l *Conn) GSSAPIBindRequestWithAPOptions(client GSSAPIClient, req *GSSAPIBi
 	return nil
 }
 
-func (l *Conn) saslBindTokenExchange(reqControls []Control, reqToken []byte) ([]byte, error) {
-	// Construct LDAP Bind request with GSSAPI SASL mechanism.
+func (l *Conn) saslBindTokenExchange(mechanism string, reqControls []Control, reqToken []byte) ([]byte, error) {
+	// Construct LDAP Bind request with the given SASL mechanism.
 	envelope := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "LDAP Request")
 	envelope.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, l.nextMessageID(), "MessageID"))
 
@@ -787,7 +787,7 @@ func (l *Conn) saslBindTokenExchange(reqControls []Control, reqToken []byte) ([]
 	request.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, "", "User Name"))
 
 	auth := ber.Encode(ber.ClassContext, ber.TypeConstructed, 3, "", "authentication")
-	auth.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, "GSSAPI", "SASL Mech"))
+	auth.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, mechanism, "SASL Mech"))
 	if len(reqToken) > 0 {
 		auth.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, string(reqToken), "Credentials"))
 	}
