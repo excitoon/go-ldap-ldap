@@ -678,6 +678,95 @@ func ntHash(pass string) string {
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
+// NTLMSASLBind performs an NTLMSSP bind using the SASL "NTLM" mechanism, i.e.
+// NTLMSSP tokens carried inside `SaslCredentials` (RFC 4422 / RFC 4513). Use it
+// against servers that advertise "NTLM" in the `rootDSE` `supportedSASLMechanisms`
+// attribute, such as a Samba Active Directory DC.
+//
+// This is distinct from `NTLMBind`, which uses Microsoft's proprietary, non-SASL
+// "Sicily" framing that only Active Directory implements. Samba does not support
+// Sicily, so `NTLMSASLBind` is the way to authenticate to it with NTLM.
+func (l *Conn) NTLMSASLBind(domain, username, password string) error {
+	_, err := l.NTLMSASLChallengeBind(&NTLMBindRequest{
+		Domain:   domain,
+		Username: username,
+		Password: password,
+	})
+	return err
+}
+
+// NTLMSASLBindWithHash performs a SASL "NTLM" bind with an NTLM hash instead of a
+// plaintext password (pass-the-hash). See `NTLMSASLBind`.
+func (l *Conn) NTLMSASLBindWithHash(domain, username, hash string) error {
+	_, err := l.NTLMSASLChallengeBind(&NTLMBindRequest{
+		Domain:   domain,
+		Username: username,
+		Hash:     hash,
+	})
+	return err
+}
+
+// NTLMSASLChallengeBind performs the SASL "NTLM" bind described by the given
+// request. The flow is the standard multi-step SASL exchange: the client sends
+// the NTLMSSP NEGOTIATE token, the server answers with `saslBindInProgress` and the
+// NTLMSSP CHALLENGE in `serverSaslCreds`, and the client replies with the NTLMSSP
+// AUTHENTICATE token. NTLM tokens are produced by https://github.com/Azure/go-ntlmssp.
+func (l *Conn) NTLMSASLChallengeBind(req *NTLMBindRequest) (*NTLMBindResult, error) {
+	if !req.AllowEmptyPassword && req.Password == "" && req.Hash == "" {
+		return nil, NewError(ErrorEmptyPassword, errors.New("ldap: empty password not allowed by the client"))
+	}
+
+	// Step 1: build the NTLMSSP NEGOTIATE (type 1) message.
+	var negMessage []byte
+	var err error
+	switch {
+	case req.Negotiator != nil:
+		negMessage, err = req.Negotiator.Negotiate(req.Domain, "")
+	default:
+		negMessage, err = ntlmssp.NewNegotiateMessage(req.Domain, "")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("create NTLM negotiate message: %s", err)
+	}
+
+	result := &NTLMBindResult{Controls: make([]Control, 0)}
+
+	// Send the negotiate token; the server returns the NTLMSSP CHALLENGE (type 2)
+	// in `serverSaslCreds` alongside `resultCode` `saslBindInProgress`.
+	challenge, err := l.saslBindTokenExchange("NTLM", req.Controls, negMessage)
+	if err != nil {
+		return result, err
+	}
+	if len(challenge) < 7 || !bytes.Equal(challenge[:7], []byte("NTLMSSP")) {
+		return result, NewError(ErrorNetwork, errors.New("ldap: server did not return an NTLMSSP challenge"))
+	}
+
+	// Step 2: derive the NTLMSSP AUTHENTICATE (type 3) message from the challenge.
+	var responseMessage []byte
+	switch {
+	case req.Negotiator == nil && req.Hash != "":
+		responseMessage, err = ntlmssp.ProcessChallengeWithHash(challenge, req.Username, req.Hash)
+	case req.Negotiator == nil:
+		_, _, domainNeeded := ntlmssp.GetDomain(req.Username)
+		responseMessage, err = ntlmssp.ProcessChallenge(challenge, req.Username, req.Password, domainNeeded)
+	default:
+		hash := req.Hash
+		if len(hash) == 0 {
+			hash = ntHash(req.Password)
+		}
+		responseMessage, err = req.Negotiator.ChallengeResponse(challenge, req.Username, hash)
+	}
+	if err != nil {
+		return result, fmt.Errorf("process NTLM challenge: %s", err)
+	}
+
+	// Send the authenticate token; a successful bind returns an empty token.
+	if _, err = l.saslBindTokenExchange("NTLM", req.Controls, responseMessage); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
 // GSSAPIClient interface is used as the client-side implementation for the
 // GSSAPI SASL mechanism.
 // Interface inspired by GSSAPIClient from golang.org/x/crypto/ssh
