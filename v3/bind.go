@@ -742,8 +742,18 @@ func (l *Conn) NTLMSASLChallengeBind(req *NTLMBindRequest) (*NTLMBindResult, err
 	}
 
 	// Step 2: derive the NTLMSSP AUTHENTICATE (type 3) message from the challenge.
+	//
+	// Over LDAPS the server (e.g. a hardened Samba/AD DC) enforces LDAP channel
+	// binding, so bind the AUTHENTICATE message to the TLS channel via the
+	// `tls-server-end-point` token; `go-ntlmssp` cannot do this itself. Plaintext
+	// connections and custom negotiators keep the `go-ntlmssp` path.
 	var responseMessage []byte
+	cbState, cbOK := l.TLSConnectionState()
+	useChannelBinding := req.Negotiator == nil && cbOK && len(cbState.PeerCertificates) > 0
 	switch {
+	case useChannelBinding:
+		cb := tlsServerEndPointChannelBinding(cbState.PeerCertificates[0])
+		responseMessage, err = ntlmAuthenticateWithChannelBinding(negMessage, challenge, req.Username, req.Password, req.Hash, cb)
 	case req.Negotiator == nil && req.Hash != "":
 		responseMessage, err = ntlmssp.ProcessChallengeWithHash(challenge, req.Username, req.Hash)
 	case req.Negotiator == nil:
